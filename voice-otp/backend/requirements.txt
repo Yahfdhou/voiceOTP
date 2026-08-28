@@ -1,0 +1,10 @@
+Flask
+flask-cors
+flask-limiter
+python-dotenv
+gunicorn
+waitress
+redis
+requests
+numpy
+scikit-learn

@@ -1,0 +1,39 @@
+# Secrets and local data — never push these.
+.env
+.env.*
+!.env.example
+!**/.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# SQLite lab data
+*.db
+*.db-journal
+otp_history.db
+*.wav
+*.ulaw
+
+# Asterisk trunk secrets (generated locally)
+voice-otp/asterisk-config/pjsip.trunk.conf
+
+# Node / Nuxt
+node_modules/
+.output/
+.nuxt/
+.nitro/
+.cache/
+dist/
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.log
+agent-transcripts/
+.cursor/

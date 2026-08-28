@@ -1,0 +1,48 @@
+; Copier ce fichier vers pjsip.trunk.conf et remplacer les REPLACE_*.
+; Ne pas committer pjsip.trunk.conf avec de vrais mots de passe.
+;
+; Fournisseur : SIP trunk (DID, identifiant, mot de passe, hôte).
+; Après copie : docker compose restart asterisk
+; Flask .env : VOICE_PROVIDER=trunk
+;
+; Sur AWS, mets l'IP publique Elastic dans pjsip.conf :
+;   external_media_address / external_signaling_address / media_address
+; Security group : UDP 5060 + UDP 10000-10010 (RTP) vers le trunk, pas le monde entier.
+
+[trunk]
+type=endpoint
+transport=transport-udp
+context=otp-trunk
+disallow=all
+allow=ulaw,alaw
+outbound_auth=trunk-auth
+aors=trunk
+; from_user / callerid = DID E.164 sans/avec + (pas le username SIP).
+from_user=REPLACE_DID_DIGITS
+from_domain=REPLACE_SIP_HOST
+callerid=+REPLACE_DID_DIGITS
+send_pai=yes
+send_rpid=yes
+trust_id_outbound=yes
+direct_media=no
+rtp_symmetric=yes
+rewrite_contact=yes
+force_rport=yes
+ice_support=no
+language=en
+
+[trunk-auth]
+type=auth
+auth_type=userpass
+username=REPLACE_TRUNK_USER
+password=REPLACE_TRUNK_PASSWORD
+
+[trunk]
+type=aor
+contact=sip:REPLACE_SIP_HOST:5060
+qualify_frequency=60
+
+[trunk-identify]
+type=identify
+endpoint=trunk
+match=REPLACE_SIP_HOST
