@@ -9,6 +9,8 @@ from otp.generator import OTP_TTL
 from otp.partner_flow import send_otp, verify_for_partner
 from otp.security import (
     MAX_VERIFY_ATTEMPTS,
+    VERIFY_REQUEST_LIMIT,
+    client_ip,
     limiter,
     otp_send_limit,
 )
@@ -49,8 +51,7 @@ def _maintenance_gate():
 
 
 def _ip():
-    forwarded = (request.headers.get("X-Forwarded-For") or "").split(",")[0].strip()
-    return forwarded or (request.remote_addr or "")
+    return client_ip()
 
 
 def _json():
@@ -58,18 +59,12 @@ def _json():
 
 
 def _partner_key():
-    return (
-        (request.headers.get("X-Api-Key") or "").strip()
-        or (request.args.get("api_key") or "").strip()
-    )
+    # Header uniquement — jamais en query string (logs / Referer).
+    return (request.headers.get("X-Api-Key") or "").strip()
 
 
 def _admin_ok():
-    provided = (
-        request.headers.get("X-Admin-Key")
-        or request.args.get("admin_key")
-        or ""
-    ).strip().encode("utf-8")
+    provided = (request.headers.get("X-Admin-Key") or "").strip().encode("utf-8")
     expected = (ADMIN_API_KEY or "").encode("utf-8")
     if not provided or not expected:
         return False
@@ -445,6 +440,7 @@ def send_email():
 
 @v1_bp.route("/v1/otp/verify", methods=["POST"])
 @require_partner
+@limiter.limit(VERIFY_REQUEST_LIMIT)
 def verify():
     payload, status = verify_for_partner(request.partner, _json(), _ip())
     return jsonify(payload), status

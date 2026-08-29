@@ -4,7 +4,6 @@ from datetime import datetime, timezone
 from functools import wraps
 
 from flask import Blueprint, jsonify, request
-from flask_limiter.util import get_remote_address
 
 from admin_config import ADMIN_API_KEY
 from db import (
@@ -45,7 +44,7 @@ from partners import (
     update_account,
 )
 from otp.partner_flow import send_otp, verify_for_partner
-from otp.security import limiter
+from otp.security import ADMIN_REQUEST_LIMIT, client_ip, limiter
 from otp.deliver import deliver_email, deliver_sms, deliver_voice, deliver_whatsapp
 from otp.generator import (
     active_otp_count,
@@ -76,12 +75,12 @@ def _partner_controls(data):
 
 
 def _ip():
-    forwarded = (request.headers.get("X-Forwarded-For") or "").split(",")[0].strip()
-    return forwarded or (request.remote_addr or "")
+    return client_ip()
 
 
 def require_admin(view):
     @wraps(view)
+    @limiter.limit(ADMIN_REQUEST_LIMIT, key_func=lambda: "admin:" + (client_ip() or "unknown"))
     def wrapped(*args, **kwargs):
         provided = (request.headers.get("X-Admin-Key") or "").encode("utf-8")
         expected = (ADMIN_API_KEY or "").encode("utf-8")
@@ -430,7 +429,7 @@ def _sandbox_limit_key():
     args = request.view_args or {}
     if args.get("account_id") is not None:
         return f"sandbox:{args['account_id']}"
-    return get_remote_address()
+    return "ip:" + (client_ip() or "unknown")
 
 
 @admin_bp.route("/admin/partners/<int:account_id>/ensure-test-key", methods=["POST"])

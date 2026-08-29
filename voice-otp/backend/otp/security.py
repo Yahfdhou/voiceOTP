@@ -10,6 +10,8 @@ OTP_TTL = 180
 MAX_VERIFY_ATTEMPTS = 3
 OTP_REQUEST_LIMIT = "20 per 5 minutes"
 OTP_TEST_REQUEST_LIMIT = "10 per 5 minutes"
+VERIFY_REQUEST_LIMIT = "60 per minute"
+ADMIN_REQUEST_LIMIT = "120 per minute"
 
 
 def otp_send_limit():
@@ -18,7 +20,24 @@ def otp_send_limit():
         return OTP_TEST_REQUEST_LIMIT
     return OTP_REQUEST_LIMIT
 
+
 _attempt_fallback = {}
+
+
+def trust_proxy():
+    return os.getenv("TRUST_PROXY", "1").strip().lower() not in ("0", "false", "no")
+
+
+def client_ip():
+    """IP client. X-Forwarded-For seulement si TRUST_PROXY=1 (derrière Nginx)."""
+    if trust_proxy():
+        forwarded = (request.headers.get("X-Forwarded-For") or "").split(",")[0].strip()
+        if forwarded:
+            return forwarded
+        real_ip = (request.headers.get("X-Real-IP") or "").strip()
+        if real_ip:
+            return real_ip
+    return request.remote_addr or ""
 
 
 def _redis():
@@ -54,7 +73,7 @@ def _limit_key():
     raw = (request.headers.get("X-Api-Key") or "").strip()
     if raw:
         return "ak:" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:40]
-    return get_remote_address()
+    return "ip:" + (client_ip() or get_remote_address() or "unknown")
 
 
 limiter = Limiter(
@@ -71,48 +90,57 @@ def _skip_cors_preflight():
     return request.method == "OPTIONS"
 
 
-def _attempt_key(user_id):
-    return f"attempts:{user_id}"
+def _scope_token(scope=None):
+    if scope is None or scope == "":
+        return "g"
+    return f"p{scope}"
 
 
-def get_attempts(user_id):
+def _attempt_key(user_id, scope=None):
+    return f"attempts:{_scope_token(scope)}:{user_id}"
+
+
+def get_attempts(user_id, scope=None):
+    key = _attempt_key(user_id, scope)
     client = _redis()
     if client is not None:
-        raw = client.get(_attempt_key(user_id))
+        raw = client.get(key)
         return int(raw) if raw else 0
-    item = _attempt_fallback.get(user_id)
+    item = _attempt_fallback.get(key)
     if not item:
         return 0
     count, expires_at = item
     if expires_at <= time.time():
-        _attempt_fallback.pop(user_id, None)
+        _attempt_fallback.pop(key, None)
         return 0
     return int(count)
 
 
-def too_many_attempts(user_id):
-    return get_attempts(user_id) >= MAX_VERIFY_ATTEMPTS
+def too_many_attempts(user_id, scope=None):
+    return get_attempts(user_id, scope=scope) >= MAX_VERIFY_ATTEMPTS
 
 
-def record_failed_attempt(user_id, ttl=OTP_TTL):
-    count = get_attempts(user_id) + 1
+def record_failed_attempt(user_id, ttl=OTP_TTL, scope=None):
+    count = get_attempts(user_id, scope=scope) + 1
+    key = _attempt_key(user_id, scope)
     client = _redis()
     if client is not None:
-        client.setex(_attempt_key(user_id), ttl, count)
+        client.setex(key, ttl, count)
     else:
-        _attempt_fallback[user_id] = (count, time.time() + ttl)
+        _attempt_fallback[key] = (count, time.time() + ttl)
     return count
 
 
-def reset_attempts(user_id):
+def reset_attempts(user_id, scope=None):
+    key = _attempt_key(user_id, scope)
     client = _redis()
     if client is not None:
-        client.delete(_attempt_key(user_id))
-    _attempt_fallback.pop(user_id, None)
+        client.delete(key)
+    _attempt_fallback.pop(key, None)
 
 
-def reject_too_many_attempts(user_id):
+def reject_too_many_attempts(user_id, scope=None):
     from otp.generator import delete_otp
 
-    delete_otp(user_id)
+    delete_otp(user_id, scope=scope)
     return jsonify({"ok": False, "reason": "too_many_attempts"}), 429

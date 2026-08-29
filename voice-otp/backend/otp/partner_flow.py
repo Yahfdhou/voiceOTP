@@ -37,6 +37,11 @@ def _is_test(partner):
     return (partner or {}).get("key_mode") == "test"
 
 
+def _scope(partner):
+    """Isole les OTP Redis par partenaire (anti cross-tenant)."""
+    return (partner or {}).get("id")
+
+
 def _write_log(partner, user_id, channel, dest, status, source_ip):
     log_event(
         user_id,
@@ -127,7 +132,7 @@ def send_otp(partner, channel, data, source_ip):
             dest = VOICE_LOCAL_EXT
             deliver_mode = "lab"
         otp = generate_otp()
-        store_otp(user_id, otp)
+        store_otp(user_id, otp, scope=_scope(partner))
         ok, result = deliver_voice(otp, dest, mode=deliver_mode)
         if not ok:
             _write_log(partner, user_id, "voice", dest, "failed", source_ip)
@@ -152,7 +157,7 @@ def send_otp(partner, channel, data, source_ip):
         if not ok:
             _write_log(partner, user_id, "sms", digits, "failed", source_ip)
             return {"status": "error", "detail": str(err)[:400], "channel": "sms"}, 502
-        store_otp(user_id, otp)
+        store_otp(user_id, otp, scope=_scope(partner))
         _write_log(partner, user_id, "sms", digits, "sent", source_ip)
         _maybe_consume(partner)
         return _sent_payload("sms", partner), 200
@@ -170,7 +175,7 @@ def send_otp(partner, channel, data, source_ip):
         if not ok:
             _write_log(partner, user_id, "whatsapp", digits, "failed", source_ip)
             return {"status": "error", "detail": str(err)[:400], "channel": "whatsapp"}, 502
-        store_whatsapp_pending(user_id, digits)
+        store_whatsapp_pending(user_id, digits, scope=_scope(partner))
         _write_log(partner, user_id, "whatsapp", digits, "sent", source_ip)
         _maybe_consume(partner)
         return _sent_payload("whatsapp", partner), 200
@@ -184,7 +189,7 @@ def send_otp(partner, channel, data, source_ip):
         if not ok:
             _write_log(partner, user_id, "email", email, "failed", source_ip)
             return {"status": "error", "detail": str(err)[:400], "channel": "email"}, 502
-        store_otp(user_id, otp)
+        store_otp(user_id, otp, scope=_scope(partner))
         _write_log(partner, user_id, "email", email, "sent", source_ip)
         _maybe_consume(partner)
         return _sent_payload("email", partner), 200
@@ -209,24 +214,25 @@ def verify_for_partner(partner, data, source_ip):
     if not user_id or not otp_input:
         return {"ok": False, "reason": "missing"}, 400
 
+    scope = _scope(partner)
     ctx = last_request_context(
         user_id,
         partner_id=(partner or {}).get("id"),
         is_test=_is_test(partner),
     )
 
-    if too_many_attempts(user_id):
+    if too_many_attempts(user_id, scope=scope):
         _write_log(
             partner, user_id, ctx["channel"], ctx["destination"], "too_many_attempts", source_ip
         )
-        return _reject_too_many(user_id)
+        return _reject_too_many(user_id, scope=scope)
 
-    wa_phone = peek_whatsapp_phone(user_id)
+    wa_phone = peek_whatsapp_phone(user_id, scope=scope)
     if wa_phone:
         ok, reason = verify_whatsapp_code(wa_phone, otp_input)
         if ok:
-            reset_attempts(user_id)
-            delete_otp(user_id)
+            reset_attempts(user_id, scope=scope)
+            delete_otp(user_id, scope=scope)
             _write_log(partner, user_id, "whatsapp", wa_phone, "verified", source_ip)
             payload = {"ok": True, "channel": "whatsapp"}
             if _is_test(partner):
@@ -236,21 +242,21 @@ def verify_for_partner(partner, data, source_ip):
             _write_log(partner, user_id, "whatsapp", wa_phone, "failed", source_ip)
             return {"status": "error", "detail": str(reason)[:400], "channel": "whatsapp"}, 502
         if reason == "invalid":
-            count = record_failed_attempt(user_id)
+            count = record_failed_attempt(user_id, scope=scope)
             if count >= MAX_VERIFY_ATTEMPTS:
                 _write_log(
                     partner, user_id, "whatsapp", wa_phone, "too_many_attempts", source_ip
                 )
-                return _reject_too_many(user_id)
+                return _reject_too_many(user_id, scope=scope)
             _write_log(partner, user_id, "whatsapp", wa_phone, "invalid", source_ip)
             return {"ok": False, "reason": "invalid"}, 400
         if reason == "expired":
             _write_log(partner, user_id, "whatsapp", wa_phone, "expired", source_ip)
         return {"ok": False, "reason": reason}, 400
 
-    ok, reason = verify_otp(user_id, otp_input)
+    ok, reason = verify_otp(user_id, otp_input, scope=scope)
     if ok:
-        reset_attempts(user_id)
+        reset_attempts(user_id, scope=scope)
         _write_log(partner, user_id, ctx["channel"], ctx["destination"], "verified", source_ip)
         payload = {"ok": True, "channel": ctx["channel"]}
         if _is_test(partner):
@@ -258,12 +264,12 @@ def verify_for_partner(partner, data, source_ip):
         return payload, 200
 
     if reason == "invalid":
-        count = record_failed_attempt(user_id)
+        count = record_failed_attempt(user_id, scope=scope)
         if count >= MAX_VERIFY_ATTEMPTS:
             _write_log(
                 partner, user_id, ctx["channel"], ctx["destination"], "too_many_attempts", source_ip
             )
-            return _reject_too_many(user_id)
+            return _reject_too_many(user_id, scope=scope)
         _write_log(partner, user_id, ctx["channel"], ctx["destination"], "invalid", source_ip)
         return {"ok": False, "reason": "invalid"}, 400
 
@@ -271,13 +277,13 @@ def verify_for_partner(partner, data, source_ip):
         _write_log(
             partner, user_id, ctx["channel"], ctx["destination"], "too_many_attempts", source_ip
         )
-        return _reject_too_many(user_id)
+        return _reject_too_many(user_id, scope=scope)
 
     if reason == "expired":
         _write_log(partner, user_id, ctx["channel"], ctx["destination"], "expired", source_ip)
     return {"ok": False, "reason": reason}, 400
 
 
-def _reject_too_many(user_id):
-    delete_otp(user_id)
+def _reject_too_many(user_id, scope=None):
+    delete_otp(user_id, scope=scope)
     return {"ok": False, "reason": "too_many_attempts"}, 429

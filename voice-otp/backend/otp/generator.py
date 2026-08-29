@@ -13,7 +13,7 @@ except Exception:
 
 OTP_TTL = 180
 MAX_ATTEMPTS = 5
-OTP_SECRET = os.getenv("OTP_SECRET", "").strip() or "voice-otp-dev-change-me"
+OTP_SECRET = os.getenv("OTP_SECRET", "").strip()
 
 _fallback_store = {}
 
@@ -33,39 +33,52 @@ def generate_otp(length=6):
     return "".join(secrets.choice("0123456789") for _ in range(length))
 
 
-def _digest(user_id, otp):
+def _scope_token(scope=None):
+    if scope is None or scope == "":
+        return "g"
+    return f"p{scope}"
+
+
+def _redis_key(user_id, scope=None):
+    return f"otp:{_scope_token(scope)}:{user_id}"
+
+
+def _digest(user_id, otp, scope=None):
+    secret = OTP_SECRET or "voice-otp-dev-change-me"
     return hmac.new(
-        OTP_SECRET.encode(),
-        f"{user_id}:{otp}".encode(),
+        secret.encode(),
+        f"{_scope_token(scope)}:{user_id}:{otp}".encode(),
         hashlib.sha256,
     ).hexdigest()
 
 
-def store_otp(user_id, otp, ttl=OTP_TTL):
-    payload = f"{_digest(user_id, otp)}|{0}|{time.time() + ttl}"
+def store_otp(user_id, otp, ttl=OTP_TTL, scope=None):
+    payload = f"{_digest(user_id, otp, scope)}|{0}|{time.time() + ttl}"
     client = _redis()
+    key = _redis_key(user_id, scope)
     if client is not None:
-        client.setex(f"otp:{user_id}", ttl, payload)
+        client.setex(key, ttl, payload)
     else:
-        _fallback_store[user_id] = payload
+        _fallback_store[key] = payload
     from otp.security import reset_attempts
-    reset_attempts(user_id)
+    reset_attempts(user_id, scope=scope)
 
 
-def store_whatsapp_pending(user_id, phone, ttl=OTP_TTL):
+def store_whatsapp_pending(user_id, phone, ttl=OTP_TTL, scope=None):
     """Session WhatsApp : le code reste chez ChinqIT, on ne stocke que le numéro."""
     payload = f"wa|{phone}|{time.time() + ttl}"
     client = _redis()
+    key = _redis_key(user_id, scope)
     if client is not None:
-        client.setex(f"otp:{user_id}", ttl, payload)
+        client.setex(key, ttl, payload)
     else:
-        _fallback_store[user_id] = payload
+        _fallback_store[key] = payload
     from otp.security import reset_attempts
-    reset_attempts(user_id)
+    reset_attempts(user_id, scope=scope)
 
 
-def peek_whatsapp_phone(user_id):
-    raw = _load(user_id)
+def peek_whatsapp_phone(user_id, scope=None):
+    raw = _load(user_id, scope=scope)
     if not raw or not raw.startswith("wa|"):
         return None
     parts = raw.split("|", 2)
@@ -80,30 +93,32 @@ def peek_whatsapp_phone(user_id):
     return phone or None
 
 
-def delete_otp(user_id):
-    _save(user_id, "", 0)
+def delete_otp(user_id, scope=None):
+    _save(user_id, "", 0, scope=scope)
 
 
-def _load(user_id):
+def _load(user_id, scope=None):
+    key = _redis_key(user_id, scope)
     client = _redis()
     if client is not None:
-        raw = client.get(f"otp:{user_id}")
+        raw = client.get(key)
         return raw.decode() if raw else None
-    return _fallback_store.get(user_id)
+    return _fallback_store.get(key)
 
 
-def _save(user_id, payload, ttl):
+def _save(user_id, payload, ttl, scope=None):
+    key = _redis_key(user_id, scope)
     client = _redis()
     if client is not None:
         if ttl <= 0:
-            client.delete(f"otp:{user_id}")
+            client.delete(key)
             return
-        client.setex(f"otp:{user_id}", ttl, payload)
+        client.setex(key, ttl, payload)
         return
     if ttl <= 0:
-        _fallback_store.pop(user_id, None)
+        _fallback_store.pop(key, None)
         return
-    _fallback_store[user_id] = payload
+    _fallback_store[key] = payload
 
 
 def active_otp_count():
@@ -114,7 +129,8 @@ def active_otp_count():
     n = 0
     for raw in _fallback_store.values():
         try:
-            _digest_s, _attempts, expires_s = raw.split("|", 2)
+            parts = raw.split("|")
+            expires_s = parts[-1]
             if float(expires_s) > now:
                 n += 1
         except Exception:
@@ -153,8 +169,8 @@ def flush_otp_keys():
     return n
 
 
-def verify_otp(user_id, otp_input):
-    raw = _load(user_id)
+def verify_otp(user_id, otp_input, scope=None):
+    raw = _load(user_id, scope=scope)
     if not raw:
         return False, "expired"
     if raw.startswith("wa|"):
@@ -169,21 +185,21 @@ def verify_otp(user_id, otp_input):
 
     ttl_left = int(expires_at - time.time())
     if ttl_left <= 0:
-        _save(user_id, raw, 0)
+        _save(user_id, raw, 0, scope=scope)
         return False, "expired"
 
     if attempts >= MAX_ATTEMPTS:
-        _save(user_id, raw, 0)
+        _save(user_id, raw, 0, scope=scope)
         return False, "locked"
 
     candidate = (otp_input or "").strip()
-    if hmac.compare_digest(digest, _digest(user_id, candidate)):
-        _save(user_id, raw, 0)
+    if hmac.compare_digest(digest, _digest(user_id, candidate, scope)):
+        _save(user_id, raw, 0, scope=scope)
         return True, "ok"
 
     attempts += 1
-    _save(user_id, f"{digest}|{attempts}|{expires_at}", ttl_left)
+    _save(user_id, f"{digest}|{attempts}|{expires_at}", ttl_left, scope=scope)
     if attempts >= MAX_ATTEMPTS:
-        _save(user_id, raw, 0)
+        _save(user_id, raw, 0, scope=scope)
         return False, "locked"
     return False, "invalid"
