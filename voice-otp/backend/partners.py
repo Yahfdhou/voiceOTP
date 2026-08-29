@@ -179,12 +179,32 @@ def _row_to_partner(row):
     status = row["status"]
     balance = _quota_balance(row["daily_quota"], used_today, status)
     access = _access_meta(_row_val(row, "access_until"), status)
+    allow_voice = bool(int(_row_val(row, "allow_voice") or 0))
+    allow_sms = bool(int(_row_val(row, "allow_sms") or 0))
+    allow_whatsapp = bool(int(_row_val(row, "allow_whatsapp") or 0))
+    allow_email = bool(int(_row_val(row, "allow_email") or 0))
+    if not any((allow_voice, allow_sms, allow_whatsapp, allow_email)) and channels:
+        flags = _flags_from_channels(channels)
+        allow_voice = bool(flags["allow_voice"])
+        allow_sms = bool(flags["allow_sms"])
+        allow_whatsapp = bool(flags["allow_whatsapp"])
+        allow_email = bool(flags["allow_email"])
+    else:
+        channels = _channels_from_flags(allow_voice, allow_sms, allow_whatsapp, allow_email) or channels
+    allowed_ip = (_row_val(row, "allowed_ip") or "").strip() or None
+    prefixes = _parse_prefixes(_row_val(row, "allowed_prefixes"))
     return {
         "id": row["id"],
         "name": row["name"],
         "email": row["email"] or "",
         "plan": row["plan"],
         "channels": channels,
+        "allow_voice": allow_voice,
+        "allow_sms": allow_sms,
+        "allow_whatsapp": allow_whatsapp,
+        "allow_email": allow_email,
+        "allowed_ip": allowed_ip,
+        "allowed_prefixes": prefixes,
         "key_prefix": row["key_prefix"],
         "test_key_prefix": _row_val(row, "test_key_prefix") or "",
         "status": status,
@@ -203,6 +223,76 @@ def _row_to_partner(row):
     }
 
 
+_CHANNEL_FLAGS = {
+    "voice": "allow_voice",
+    "sms": "allow_sms",
+    "whatsapp": "allow_whatsapp",
+    "email": "allow_email",
+}
+
+_UNSET = object()
+
+
+def _as_bool(value, default=False):
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in ("1", "true", "yes", "on"):
+        return True
+    if text in ("0", "false", "no", "off", ""):
+        return False
+    return default
+
+
+def channel_enabled(partner, channel):
+    if not partner:
+        return False
+    flag = _CHANNEL_FLAGS.get(channel)
+    if flag and flag in partner:
+        return bool(partner.get(flag))
+    return channel in (partner.get("channels") or [])
+
+
+def ip_authorized(partner, client_ip):
+    raw = ((partner or {}).get("allowed_ip") or "").strip()
+    if not raw:
+        return True
+    allowed = [item.strip() for item in raw.replace(";", ",").split(",") if item.strip()]
+    if not allowed:
+        return True
+    client = (client_ip or "").strip()
+    if not client:
+        return False
+    return client in allowed
+
+
+def destination_prefixes_for(partner):
+    partner_prefixes = (partner or {}).get("allowed_prefixes") or []
+    if partner_prefixes:
+        return [str(p).strip().lstrip("+") for p in partner_prefixes if str(p).strip()]
+    from system_settings import global_country_prefixes
+    return global_country_prefixes()
+
+
+def destination_country_ok(digits, partner=None):
+    from product_config import VOICE_LOCAL_EXT
+
+    phone = "".join(ch for ch in str(digits or "") if ch.isdigit())
+    if not phone:
+        return False
+    if phone == str(VOICE_LOCAL_EXT or "1000"):
+        return True
+    prefixes = destination_prefixes_for(partner)
+    for prefix in prefixes:
+        if prefix and phone.startswith(prefix):
+            return True
+    return False
+
+
 def _ensure_test_key_columns(conn):
     cols = {item[1] for item in conn.execute("PRAGMA table_info(partner_accounts)").fetchall()}
     if "test_key_hash" not in cols:
@@ -213,6 +303,56 @@ def _ensure_test_key_columns(conn):
         conn.execute("ALTER TABLE partner_accounts ADD COLUMN access_until TEXT")
     if "access_started_at" not in cols:
         conn.execute("ALTER TABLE partner_accounts ADD COLUMN access_started_at TEXT")
+    for col, decl in (
+        ("allow_voice", "INTEGER NOT NULL DEFAULT 0"),
+        ("allow_sms", "INTEGER NOT NULL DEFAULT 0"),
+        ("allow_whatsapp", "INTEGER NOT NULL DEFAULT 0"),
+        ("allow_email", "INTEGER NOT NULL DEFAULT 0"),
+        ("allowed_ip", "TEXT"),
+        ("allowed_prefixes", "TEXT"),
+    ):
+        if col not in cols:
+            conn.execute(f"ALTER TABLE partner_accounts ADD COLUMN {col} {decl}")
+
+
+def _channels_from_flags(allow_voice, allow_sms, allow_whatsapp, allow_email):
+    out = []
+    if allow_voice:
+        out.append("voice")
+    if allow_sms:
+        out.append("sms")
+    if allow_whatsapp:
+        out.append("whatsapp")
+    if allow_email:
+        out.append("email")
+    return out
+
+
+def _flags_from_channels(channels):
+    ch = set(channels or [])
+    return {
+        "allow_voice": 1 if "voice" in ch else 0,
+        "allow_sms": 1 if "sms" in ch else 0,
+        "allow_whatsapp": 1 if "whatsapp" in ch else 0,
+        "allow_email": 1 if "email" in ch else 0,
+    }
+
+
+def _parse_prefixes(raw):
+    if raw is None:
+        return []
+    if isinstance(raw, list):
+        return [str(x).strip().lstrip("+") for x in raw if str(x).strip()]
+    text = str(raw or "").strip()
+    if not text:
+        return []
+    try:
+        data = json.loads(text)
+        if isinstance(data, list):
+            return [str(x).strip().lstrip("+") for x in data if str(x).strip()]
+    except Exception:
+        pass
+    return [p.strip().lstrip("+") for p in text.replace(";", ",").split(",") if p.strip()]
 
 
 def init_partners():
@@ -223,6 +363,7 @@ def init_partners():
     _backfill_test_keys()
     _backfill_access()
     _backfill_whatsapp_channel()
+    _backfill_channel_flags()
     with _connect() as conn:
         try:
             conn.execute(
@@ -231,6 +372,43 @@ def init_partners():
             )
         except sqlite3.OperationalError:
             pass
+
+
+def _backfill_channel_flags():
+    """Aligne allow_* sur le JSON channels existant (migration sûre)."""
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT id, channels, allow_sms, allow_voice, allow_whatsapp, allow_email FROM partner_accounts"
+        ).fetchall()
+        for row in rows:
+            try:
+                channels = json.loads(row["channels"] or "[]")
+            except Exception:
+                channels = []
+            if not isinstance(channels, list):
+                channels = []
+            # Si aucune case n'est encore cochée mais channels non vide → backfill
+            any_flag = any(
+                int(_row_val(row, k) or 0)
+                for k in ("allow_sms", "allow_voice", "allow_whatsapp", "allow_email")
+            )
+            if any_flag:
+                continue
+            flags = _flags_from_channels(channels)
+            conn.execute(
+                """
+                UPDATE partner_accounts
+                SET allow_voice = ?, allow_sms = ?, allow_whatsapp = ?, allow_email = ?
+                WHERE id = ?
+                """,
+                (
+                    flags["allow_voice"],
+                    flags["allow_sms"],
+                    flags["allow_whatsapp"],
+                    flags["allow_email"],
+                    row["id"],
+                ),
+            )
 
 
 def _backfill_test_keys():
@@ -373,7 +551,18 @@ def list_accounts(include_email=False):
     return out
 
 
-def create_account(name, email, plan, days=None):
+def create_account(
+    name,
+    email,
+    plan,
+    days=None,
+    allow_voice=_UNSET,
+    allow_sms=_UNSET,
+    allow_whatsapp=_UNSET,
+    allow_email=_UNSET,
+    allowed_ip=_UNSET,
+    allowed_prefixes=_UNSET,
+):
     plan = (plan or "starter").strip().lower()
     if plan not in PLANS:
         return None, "plan_invalide"
@@ -386,6 +575,34 @@ def create_account(name, email, plan, days=None):
 
     grant_days = _parse_grant_days(days)
     spec = PLANS[plan]
+    flags_provided = any(
+        value is not _UNSET
+        for value in (allow_voice, allow_sms, allow_whatsapp, allow_email)
+    )
+    flags = _flags_from_channels(spec["channels"])
+    if flags_provided:
+        if allow_voice is not _UNSET:
+            flags["allow_voice"] = 1 if _as_bool(allow_voice) else 0
+        if allow_sms is not _UNSET:
+            flags["allow_sms"] = 1 if _as_bool(allow_sms) else 0
+        if allow_whatsapp is not _UNSET:
+            flags["allow_whatsapp"] = 1 if _as_bool(allow_whatsapp) else 0
+        if allow_email is not _UNSET:
+            flags["allow_email"] = 1 if _as_bool(allow_email) else 0
+        channels = _channels_from_flags(
+            flags["allow_voice"],
+            flags["allow_sms"],
+            flags["allow_whatsapp"],
+            flags["allow_email"],
+        )
+    else:
+        channels = list(spec["channels"])
+    ip_value = None if allowed_ip is _UNSET else ((allowed_ip or "").strip() or None)
+    prefix_value = (
+        None
+        if allowed_prefixes is _UNSET
+        else json.dumps(_parse_prefixes(allowed_prefixes) or [])
+    )
     raw_key = generate_api_key()
     test_raw = generate_test_key()
     started = _today()
@@ -397,14 +614,17 @@ def create_account(name, email, plan, days=None):
             (name, email, plan, channels, key_hash, key_prefix,
              test_key_hash, test_key_prefix, status,
              daily_quota, used_today, used_on, created_at,
-             access_started_at, access_until)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, 0, ?, ?, ?, ?)
+             access_started_at, access_until,
+             allow_voice, allow_sms, allow_whatsapp, allow_email,
+             allowed_ip, allowed_prefixes)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, 0, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?, ?)
             """,
             (
                 name,
                 email,
                 plan,
-                json.dumps(spec["channels"]),
+                json.dumps(channels),
                 hash_key(raw_key),
                 _key_prefix(raw_key),
                 hash_key(test_raw),
@@ -414,6 +634,12 @@ def create_account(name, email, plan, days=None):
                 _now(),
                 started,
                 until,
+                flags["allow_voice"],
+                flags["allow_sms"],
+                flags["allow_whatsapp"],
+                flags["allow_email"],
+                ip_value,
+                prefix_value,
             ),
         )
         account_id = cur.lastrowid
@@ -483,7 +709,18 @@ def renew_access(account_id, days=None):
     return get_account(account_id), None
 
 
-def update_account(account_id, name=None, email=None, plan=None):
+def update_account(
+    account_id,
+    name=None,
+    email=None,
+    plan=None,
+    allow_voice=_UNSET,
+    allow_sms=_UNSET,
+    allow_whatsapp=_UNSET,
+    allow_email=_UNSET,
+    allowed_ip=_UNSET,
+    allowed_prefixes=_UNSET,
+):
     partner = get_account(account_id)
     if not partner:
         return None, "compte_introuvable"
@@ -501,19 +738,66 @@ def update_account(account_id, name=None, email=None, plan=None):
         return None, "plan_invalide"
 
     spec = PLANS[next_plan]
+    flags_provided = any(
+        value is not _UNSET
+        for value in (allow_voice, allow_sms, allow_whatsapp, allow_email)
+    )
+    plan_changed = next_plan != partner["plan"]
+    if flags_provided:
+        next_allow_voice = (
+            partner.get("allow_voice") if allow_voice is _UNSET else _as_bool(allow_voice)
+        )
+        next_allow_sms = partner.get("allow_sms") if allow_sms is _UNSET else _as_bool(allow_sms)
+        next_allow_whatsapp = (
+            partner.get("allow_whatsapp") if allow_whatsapp is _UNSET else _as_bool(allow_whatsapp)
+        )
+        next_allow_email = (
+            partner.get("allow_email") if allow_email is _UNSET else _as_bool(allow_email)
+        )
+        next_channels = _channels_from_flags(
+            next_allow_voice, next_allow_sms, next_allow_whatsapp, next_allow_email
+        )
+    elif plan_changed:
+        next_channels = list(spec["channels"])
+        flags = _flags_from_channels(next_channels)
+        next_allow_voice = bool(flags["allow_voice"])
+        next_allow_sms = bool(flags["allow_sms"])
+        next_allow_whatsapp = bool(flags["allow_whatsapp"])
+        next_allow_email = bool(flags["allow_email"])
+    else:
+        next_channels = list(partner.get("channels") or spec["channels"])
+        next_allow_voice = bool(partner.get("allow_voice"))
+        next_allow_sms = bool(partner.get("allow_sms"))
+        next_allow_whatsapp = bool(partner.get("allow_whatsapp"))
+        next_allow_email = bool(partner.get("allow_email"))
+
+    next_ip = partner.get("allowed_ip") if allowed_ip is _UNSET else ((allowed_ip or "").strip() or None)
+    if allowed_prefixes is _UNSET:
+        next_prefixes = json.dumps(partner.get("allowed_prefixes") or [])
+    else:
+        next_prefixes = json.dumps(_parse_prefixes(allowed_prefixes) or [])
+
     with _connect() as conn:
         conn.execute(
             """
             UPDATE partner_accounts
-            SET name = ?, email = ?, plan = ?, channels = ?, daily_quota = ?
+            SET name = ?, email = ?, plan = ?, channels = ?, daily_quota = ?,
+                allow_voice = ?, allow_sms = ?, allow_whatsapp = ?, allow_email = ?,
+                allowed_ip = ?, allowed_prefixes = ?
             WHERE id = ?
             """,
             (
                 next_name,
                 next_email,
                 next_plan,
-                json.dumps(spec["channels"]),
+                json.dumps(next_channels),
                 spec["daily_quota"],
+                1 if next_allow_voice else 0,
+                1 if next_allow_sms else 0,
+                1 if next_allow_whatsapp else 0,
+                1 if next_allow_email else 0,
+                next_ip,
+                next_prefixes,
                 account_id,
             ),
         )

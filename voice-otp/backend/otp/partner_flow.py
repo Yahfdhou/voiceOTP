@@ -15,7 +15,14 @@ from otp.security import (
     reset_attempts,
     too_many_attempts,
 )
-from partners import consume_quota, quota_ok, touch_last_used
+from partners import (
+    channel_enabled,
+    consume_quota,
+    destination_country_ok,
+    destination_prefixes_for,
+    quota_ok,
+    touch_last_used,
+)
 from product_config import VOICE_LOCAL_EXT, voice_is_telnyx_cloud, voice_is_trunk
 
 
@@ -51,12 +58,23 @@ def _maybe_consume(partner):
     consume_quota(partner["id"])
 
 
+def _country_error(partner, dest, channel, source_ip):
+    _write_log(partner, "-", channel, dest, "invalid_destination_country", source_ip)
+    return {
+        "error": "invalid_destination_country",
+        "status": "error",
+        "detail": "invalid_destination_country",
+        "destination": dest,
+        "allowed_prefixes": destination_prefixes_for(partner),
+    }, 400
+
+
 def send_otp(partner, channel, data, source_ip):
-    allowed = (partner or {}).get("channels") or []
-    if channel not in allowed:
+    if not channel_enabled(partner, channel):
         return {
+            "error": "channel_disabled_for_account",
             "status": "error",
-            "detail": "channel_not_in_plan",
+            "detail": "channel_disabled_for_account",
             "channel": channel,
             "plan": (partner or {}).get("plan"),
         }, 403
@@ -97,6 +115,8 @@ def send_otp(partner, channel, data, source_ip):
             dest = normalize_phone(phone)
             if not dest:
                 return {"status": "error", "detail": "Numéro de téléphone invalide"}, 400
+            if not destination_country_ok(dest, partner):
+                return _country_error(partner, dest, "voice", source_ip)
             if voice_mode in ("trunk", "sip"):
                 deliver_mode = "trunk"
             elif voice_mode in ("live", "telnyx", "real", "cloud") or voice_is_telnyx_cloud():
@@ -125,6 +145,8 @@ def send_otp(partner, channel, data, source_ip):
         digits = normalize_phone(phone)
         if not digits:
             return {"status": "error", "detail": "Numéro de téléphone invalide"}, 400
+        if not destination_country_ok(digits, partner):
+            return _country_error(partner, digits, "sms", source_ip)
         otp = generate_otp()
         ok, err = deliver_sms(digits, otp)
         if not ok:
@@ -142,6 +164,8 @@ def send_otp(partner, channel, data, source_ip):
         digits = normalize_phone(phone)
         if not digits:
             return {"status": "error", "detail": "Numéro de téléphone invalide"}, 400
+        if not destination_country_ok(digits, partner):
+            return _country_error(partner, digits, "whatsapp", source_ip)
         ok, err = deliver_whatsapp(digits)
         if not ok:
             _write_log(partner, user_id, "whatsapp", digits, "failed", source_ip)

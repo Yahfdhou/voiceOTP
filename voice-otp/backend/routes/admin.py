@@ -14,6 +14,7 @@ from db import (
     dashboard_payload,
     funnel,
     heatmap,
+    live_traffic,
     log_event,
     overview_kpis,
     partner_request_totals,
@@ -53,8 +54,24 @@ from otp.generator import (
     store_otp,
     store_whatsapp_pending,
 )
+from system_settings import get_settings, update_settings
 
 admin_bp = Blueprint("admin", __name__)
+
+
+def _partner_controls(data):
+    extra = {}
+    for key in (
+        "allow_voice",
+        "allow_sms",
+        "allow_whatsapp",
+        "allow_email",
+        "allowed_ip",
+        "allowed_prefixes",
+    ):
+        if key in data:
+            extra[key] = data.get(key)
+    return extra
 
 
 def _ip():
@@ -158,6 +175,41 @@ def stats_sparkline():
 @require_admin
 def recent_requests():
     return jsonify({"results": recent_events(20)}), 200
+
+
+@admin_bp.route("/admin/traffic/live", methods=["GET"])
+@require_admin
+def traffic_live():
+    limit = request.args.get("limit", 20)
+    include_test = str(request.args.get("include_test", "1")).strip().lower() not in (
+        "0", "false", "no",
+    )
+    return jsonify({
+        "results": live_traffic(limit, include_test=include_test),
+        "settings": get_settings(),
+    }), 200
+
+
+@admin_bp.route("/admin/settings", methods=["GET"])
+@require_admin
+def settings_get():
+    return jsonify(get_settings()), 200
+
+
+@admin_bp.route("/admin/settings", methods=["PATCH", "POST"])
+@require_admin
+def settings_update():
+    data = request.get_json(silent=True) or {}
+    payload = update_settings(
+        is_maintenance=data.get("is_maintenance") if "is_maintenance" in data else None,
+        maintenance_detail=data.get("maintenance_detail") if "maintenance_detail" in data else None,
+        allowed_country_prefixes=(
+            data.get("allowed_country_prefixes")
+            if "allowed_country_prefixes" in data
+            else None
+        ),
+    )
+    return jsonify(payload), 200
 
 
 @admin_bp.route("/admin/logs", methods=["GET"])
@@ -282,6 +334,7 @@ def partners_create():
         data.get("email"),
         data.get("plan") or "starter",
         data.get("days") or data.get("grant_days"),
+        **_partner_controls(data),
     )
     if err:
         return jsonify({"status": "error", "detail": err}), 400
@@ -343,6 +396,7 @@ def partners_update(account_id):
         name=data.get("name"),
         email=data.get("email"),
         plan=data.get("plan"),
+        **_partner_controls(data),
     )
     if err == "compte_introuvable":
         return jsonify({"status": "error", "detail": err}), 404

@@ -25,6 +25,7 @@ def main():
         serve(app, host=HOST, port=int(PORT), threads=max(int(WORKERS), 2))
         return
 
+    # --timeout : laisser Ollama (CPU) finir les requêtes /admin/ai/*
     os.execvp(
         "gunicorn",
         [
@@ -33,6 +34,8 @@ def main():
             str(WORKERS),
             "-b",
             f"{HOST}:{PORT}",
+            "--timeout",
+            os.getenv("GUNICORN_TIMEOUT", "180"),
             "app:app",
         ],
     )

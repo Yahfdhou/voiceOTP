@@ -364,8 +364,14 @@ def enrich_with_llm(payload):
         "predictions": payload.get("predictions"),
     }
     narrative, provider, model, status = generate_dashboard_narrative(safe)
-    payload["llm"] = _llm_block(provider, model, status)
-    payload["provider"] = provider
+    payload["llm"] = _llm_block(provider, model or status.get("model"), status)
+    # Toujours refléter l’état live du démon (même si la rédaction a échoué)
+    if status.get("online"):
+        payload["llm"]["online"] = True
+    if status.get("model_ready"):
+        payload["llm"]["model_ready"] = True
+        payload["llm"]["model"] = model or status.get("model")
+    payload["provider"] = "ollama" if (narrative and provider == "ollama") else "template"
     if not narrative:
         return payload
     insights = payload.get("insights") or {}

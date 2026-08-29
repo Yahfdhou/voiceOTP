@@ -15,16 +15,37 @@ from otp.security import (
 from partners import (
     PLANS,
     access_ok,
+    channel_enabled,
     create_account,
     find_by_api_key,
+    ip_authorized,
     list_accounts,
     quota_ok,
     revoke_account,
     touch_last_used,
 )
 from product_config import PRODUCT_BASE, PRODUCT_NAME
+from system_settings import get_settings, is_maintenance
 
 v1_bp = Blueprint("v1", __name__)
+
+
+@v1_bp.before_request
+def _maintenance_gate():
+    path = request.path or ""
+    if not path.startswith("/v1/otp"):
+        return None
+    if not is_maintenance():
+        return None
+    detail = (
+        get_settings().get("maintenance_detail")
+        or "Gateway is under scheduled maintenance"
+    )
+    return jsonify({
+        "error": "system_maintenance",
+        "detail": detail,
+        "status": "error",
+    }), 503
 
 
 def _ip():
@@ -82,6 +103,22 @@ def require_partner(view):
                 "days_left": match.get("days_left"),
                 "hint": "Le mois d'accès est terminé. L'administrateur doit renouveler après paiement.",
             }), 403
+        if not ip_authorized(match, _ip()):
+            from db import log_event
+            log_event(
+                "-",
+                "-",
+                "-",
+                "ip_unauthorized",
+                _ip(),
+                match.get("id"),
+                is_test=match.get("key_mode") == "test",
+            )
+            return jsonify({
+                "error": "ip_unauthorized",
+                "status": "error",
+                "detail": "ip_unauthorized",
+            }), 403
         request.partner = match
         touch_last_used(match["id"])
         return view(*args, **kwargs)
@@ -93,13 +130,24 @@ def require_channel(channel):
     def decorator(view):
         @wraps(view)
         def wrapped(*args, **kwargs):
-            allowed = (getattr(request, "partner", None) or {}).get("channels") or []
-            if channel not in allowed:
+            partner = getattr(request, "partner", None) or {}
+            if not channel_enabled(partner, channel):
+                from db import log_event
+                log_event(
+                    "-",
+                    channel,
+                    "-",
+                    "channel_disabled_for_account",
+                    _ip(),
+                    partner.get("id"),
+                    is_test=partner.get("key_mode") == "test",
+                )
                 return jsonify({
+                    "error": "channel_disabled_for_account",
                     "status": "error",
-                    "detail": "channel_not_in_plan",
+                    "detail": "channel_disabled_for_account",
                     "channel": channel,
-                    "plan": (request.partner or {}).get("plan"),
+                    "plan": partner.get("plan"),
                 }), 403
             return view(*args, **kwargs)
 

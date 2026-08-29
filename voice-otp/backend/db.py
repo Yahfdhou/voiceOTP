@@ -47,7 +47,10 @@ def init_db():
         conn.executescript(_CREATE)
         _ensure_partner_column(conn)
     from partners import init_partners
+    from system_settings import init_settings
+
     init_partners()
+    init_settings()
 
 
 def mask_destination(value, channel=None):
@@ -200,6 +203,75 @@ def recent_events(limit=20):
             (int(limit),),
         ).fetchall()
     return [event_to_dict(r) for r in rows]
+
+
+def _status_to_http(status: str) -> int:
+    key = (status or "").lower()
+    if key in ("sent", "verified", "ok"):
+        return 200
+    if key in ("expired", "invalid", "failed", "invalid_destination_country"):
+        return 400
+    if key in ("unauthorized", "account_revoked", "channel_disabled_for_account", "ip_unauthorized"):
+        return 403
+    if key in ("quota_exceeded", "too_many_attempts"):
+        return 429
+    if key in ("system_maintenance",):
+        return 503
+    return 200
+
+
+def live_traffic(limit=20, include_test=True):
+    """Derniers événements OTP avec nom partenaire (feed admin)."""
+    init_db()
+    try:
+        limit = min(max(int(limit or 20), 1), 100)
+    except (TypeError, ValueError):
+        limit = 20
+    with _connect() as conn:
+        if include_test:
+            rows = conn.execute(
+                """
+                SELECT e.id, e.timestamp, e.user_id, e.channel, e.destination,
+                       e.status, e.source_ip, e.partner_id, IFNULL(e.is_test, 0) AS is_test,
+                       p.name AS partner_name
+                FROM otp_events e
+                LEFT JOIN partner_accounts p ON p.id = e.partner_id
+                ORDER BY e.id DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT e.id, e.timestamp, e.user_id, e.channel, e.destination,
+                       e.status, e.source_ip, e.partner_id, IFNULL(e.is_test, 0) AS is_test,
+                       p.name AS partner_name
+                FROM otp_events e
+                LEFT JOIN partner_accounts p ON p.id = e.partner_id
+                WHERE IFNULL(e.is_test, 0) = 0
+                ORDER BY e.id DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+    items = []
+    for row in rows:
+        status = row["status"]
+        items.append({
+            "id": row["id"],
+            "timestamp": row["timestamp"],
+            "partner_id": row["partner_id"],
+            "partner_name": row["partner_name"] or ("—" if not row["partner_id"] else f"#{row['partner_id']}"),
+            "user_id": row["user_id"],
+            "channel": row["channel"],
+            "destination": row["destination"],
+            "status": status,
+            "status_code": _status_to_http(status),
+            "source_ip": row["source_ip"] or "",
+            "is_test": bool(row["is_test"]),
+        })
+    return items
 
 
 def query_events(channel=None, status=None, date_from=None, date_to=None, page=1, page_size=20):
