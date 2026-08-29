@@ -11,7 +11,9 @@ MAX_VERIFY_ATTEMPTS = 3
 OTP_REQUEST_LIMIT = "20 per 5 minutes"
 OTP_TEST_REQUEST_LIMIT = "10 per 5 minutes"
 VERIFY_REQUEST_LIMIT = "60 per minute"
-ADMIN_REQUEST_LIMIT = "120 per minute"
+# Dashboard Nuxt poll (Live Traffic 5s + stats) — large assez pour l’UI,
+# toujours limitant pour brute-force massif de X-Admin-Key.
+ADMIN_REQUEST_LIMIT = "600 per minute"
 
 
 def otp_send_limit():
