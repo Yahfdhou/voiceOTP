@@ -220,58 +220,125 @@ def _status_to_http(status: str) -> int:
     return 200
 
 
-def live_traffic(limit=20, include_test=True):
+def _traffic_row(row):
+    status = row["status"]
+    return {
+        "id": row["id"],
+        "timestamp": row["timestamp"],
+        "partner_id": row["partner_id"],
+        "partner_name": row["partner_name"]
+        or ("—" if not row["partner_id"] else f"#{row['partner_id']}"),
+        "user_id": row["user_id"],
+        "channel": row["channel"],
+        "destination": row["destination"],
+        "status": status,
+        "status_code": _status_to_http(status),
+        "source_ip": row["source_ip"] or "",
+        "is_test": bool(row["is_test"]),
+    }
+
+
+def _traffic_summary(items):
+    by_channel = {}
+    by_status = {}
+    test_count = 0
+    live_count = 0
+    success = 0
+    failed = 0
+    ips = set()
+    for item in items:
+        ch = item.get("channel") or "unknown"
+        st = item.get("status") or "unknown"
+        by_channel[ch] = by_channel.get(ch, 0) + 1
+        by_status[st] = by_status.get(st, 0) + 1
+        if item.get("is_test"):
+            test_count += 1
+        else:
+            live_count += 1
+        if st in ("sent", "verified", "ok"):
+            success += 1
+        elif st in (
+            "failed", "invalid", "expired", "too_many_attempts",
+            "invalid_destination_country", "channel_disabled_for_account",
+            "ip_unauthorized",
+        ):
+            failed += 1
+        ip = (item.get("source_ip") or "").strip()
+        if ip:
+            ips.add(ip)
+    total = len(items)
+    return {
+        "total": total,
+        "success": success,
+        "failed": failed,
+        "success_rate": round((success / total) * 100, 1) if total else 0.0,
+        "test_count": test_count,
+        "live_count": live_count,
+        "unique_ips": len(ips),
+        "by_channel": by_channel,
+        "by_status": by_status,
+        "top_ips": sorted(ips)[:8],
+    }
+
+
+def live_traffic(limit=20, include_test=True, partner_id=None):
     """Derniers événements OTP avec nom partenaire (feed admin)."""
     init_db()
     try:
         limit = min(max(int(limit or 20), 1), 100)
     except (TypeError, ValueError):
         limit = 20
+    clauses = []
+    args = []
+    if not include_test:
+        clauses.append("IFNULL(e.is_test, 0) = 0")
+    if partner_id is not None and str(partner_id).strip() != "":
+        try:
+            clauses.append("e.partner_id = ?")
+            args.append(int(partner_id))
+        except (TypeError, ValueError):
+            pass
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    args.append(limit)
     with _connect() as conn:
-        if include_test:
-            rows = conn.execute(
-                """
-                SELECT e.id, e.timestamp, e.user_id, e.channel, e.destination,
-                       e.status, e.source_ip, e.partner_id, IFNULL(e.is_test, 0) AS is_test,
-                       p.name AS partner_name
-                FROM otp_events e
-                LEFT JOIN partner_accounts p ON p.id = e.partner_id
-                ORDER BY e.id DESC
-                LIMIT ?
-                """,
-                (limit,),
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                """
-                SELECT e.id, e.timestamp, e.user_id, e.channel, e.destination,
-                       e.status, e.source_ip, e.partner_id, IFNULL(e.is_test, 0) AS is_test,
-                       p.name AS partner_name
-                FROM otp_events e
-                LEFT JOIN partner_accounts p ON p.id = e.partner_id
-                WHERE IFNULL(e.is_test, 0) = 0
-                ORDER BY e.id DESC
-                LIMIT ?
-                """,
-                (limit,),
-            ).fetchall()
-    items = []
-    for row in rows:
-        status = row["status"]
-        items.append({
+        rows = conn.execute(
+            f"""
+            SELECT e.id, e.timestamp, e.user_id, e.channel, e.destination,
+                   e.status, e.source_ip, e.partner_id, IFNULL(e.is_test, 0) AS is_test,
+                   p.name AS partner_name
+            FROM otp_events e
+            LEFT JOIN partner_accounts p ON p.id = e.partner_id
+            {where}
+            ORDER BY e.id DESC
+            LIMIT ?
+            """,
+            tuple(args),
+        ).fetchall()
+        partner_rows = conn.execute(
+            """
+            SELECT p.id, p.name, COUNT(e.id) AS event_count
+            FROM partner_accounts p
+            LEFT JOIN otp_events e ON e.partner_id = p.id
+            GROUP BY p.id, p.name
+            ORDER BY event_count DESC, p.name COLLATE NOCASE
+            """
+        ).fetchall()
+    items = [_traffic_row(row) for row in rows]
+    partners = [
+        {
             "id": row["id"],
-            "timestamp": row["timestamp"],
-            "partner_id": row["partner_id"],
-            "partner_name": row["partner_name"] or ("—" if not row["partner_id"] else f"#{row['partner_id']}"),
-            "user_id": row["user_id"],
-            "channel": row["channel"],
-            "destination": row["destination"],
-            "status": status,
-            "status_code": _status_to_http(status),
-            "source_ip": row["source_ip"] or "",
-            "is_test": bool(row["is_test"]),
-        })
-    return items
+            "name": row["name"],
+            "event_count": int(row["event_count"] or 0),
+        }
+        for row in partner_rows
+    ]
+    return {
+        "results": items,
+        "summary": _traffic_summary(items),
+        "partners": partners,
+        "partner_id": int(partner_id) if partner_id not in (None, "") else None,
+        "limit": limit,
+    }
 
 
 def query_events(channel=None, status=None, date_from=None, date_to=None, page=1, page_size=20):

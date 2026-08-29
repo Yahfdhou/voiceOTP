@@ -1,5 +1,6 @@
 import hashlib
 import hmac
+from datetime import datetime, timezone
 from functools import wraps
 
 from flask import Blueprint, jsonify, request
@@ -180,14 +181,19 @@ def recent_requests():
 @admin_bp.route("/admin/traffic/live", methods=["GET"])
 @require_admin
 def traffic_live():
-    limit = request.args.get("limit", 20)
+    limit = request.args.get("limit", 50)
     include_test = str(request.args.get("include_test", "1")).strip().lower() not in (
         "0", "false", "no",
     )
-    return jsonify({
-        "results": live_traffic(limit, include_test=include_test),
-        "settings": get_settings(),
-    }), 200
+    partner_id = request.args.get("partner_id")
+    payload = live_traffic(
+        limit,
+        include_test=include_test,
+        partner_id=partner_id if partner_id not in (None, "", "all") else None,
+    )
+    payload["settings"] = get_settings()
+    payload["generated_at"] = datetime.now(timezone.utc).isoformat()
+    return jsonify(payload), 200
 
 
 @admin_bp.route("/admin/settings", methods=["GET"])
