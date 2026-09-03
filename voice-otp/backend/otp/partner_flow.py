@@ -133,6 +133,15 @@ def send_otp(partner, channel, data, source_ip):
             deliver_mode = "lab"
         otp = generate_otp()
         store_otp(user_id, otp, scope=_scope(partner))
+        # sk_test_ : lab Linphone OK ; Telnyx/SIP réel = simulé (pas de coût).
+        if _is_test(partner) and not use_lab:
+            _write_log(partner, user_id, "voice", dest, "sent", source_ip)
+            _maybe_consume(partner)
+            payload = _sent_payload("voice", partner)
+            payload["voiceMode"] = "live"
+            payload["delivery"] = "simulated"
+            payload["hint"] = "sk_test_ : appel Telnyx non déclenché. Utilisez sk_live_ pour un appel réel."
+            return payload, 200
         ok, result = deliver_voice(otp, dest, mode=deliver_mode)
         if not ok:
             _write_log(partner, user_id, "voice", dest, "failed", source_ip)
@@ -153,6 +162,14 @@ def send_otp(partner, channel, data, source_ip):
         if not destination_country_ok(digits, partner):
             return _country_error(partner, digits, "sms", source_ip)
         otp = generate_otp()
+        if _is_test(partner):
+            store_otp(user_id, otp, scope=_scope(partner))
+            _write_log(partner, user_id, "sms", digits, "sent", source_ip)
+            _maybe_consume(partner)
+            payload = _sent_payload("sms", partner)
+            payload["delivery"] = "simulated"
+            payload["hint"] = "sk_test_ : SMS non envoyé. Vérifiez avec /v1/otp/verify puis passez en sk_live_."
+            return payload, 200
         ok, err = deliver_sms(digits, otp)
         if not ok:
             _write_log(partner, user_id, "sms", digits, "failed", source_ip)
@@ -171,6 +188,13 @@ def send_otp(partner, channel, data, source_ip):
             return {"status": "error", "detail": "Numéro de téléphone invalide"}, 400
         if not destination_country_ok(digits, partner):
             return _country_error(partner, digits, "whatsapp", source_ip)
+        if _is_test(partner):
+            store_whatsapp_pending(user_id, digits, scope=_scope(partner))
+            _write_log(partner, user_id, "whatsapp", digits, "sent", source_ip)
+            _maybe_consume(partner)
+            payload = _sent_payload("whatsapp", partner)
+            payload["delivery"] = "simulated"
+            return payload, 200
         ok, err = deliver_whatsapp(digits)
         if not ok:
             _write_log(partner, user_id, "whatsapp", digits, "failed", source_ip)
@@ -185,6 +209,13 @@ def send_otp(partner, channel, data, source_ip):
         if not user_id or not email:
             return {"status": "error", "detail": "userId et email requis"}, 400
         otp = generate_otp()
+        if _is_test(partner):
+            store_otp(user_id, otp, scope=_scope(partner))
+            _write_log(partner, user_id, "email", email, "sent", source_ip)
+            _maybe_consume(partner)
+            payload = _sent_payload("email", partner)
+            payload["delivery"] = "simulated"
+            return payload, 200
         ok, err = deliver_email(email, otp)
         if not ok:
             _write_log(partner, user_id, "email", email, "failed", source_ip)

@@ -74,6 +74,22 @@ def _admin_ok():
     )
 
 
+def require_admin_v1(view):
+    """Auth admin + rate limit (évite brute-force sur /v1/accounts/*)."""
+    @wraps(view)
+    @limiter.limit("60 per minute", key_func=lambda: "admin:" + (_ip() or "unknown"))
+    def wrapped(*args, **kwargs):
+        if not _admin_ok():
+            return jsonify({
+                "status": "error",
+                "detail": "unauthorized",
+                "hint": "X-Admin-Key requis. Les partenaires ne peuvent pas gérer les comptes.",
+            }), 401
+        return view(*args, **kwargs)
+
+    return wrapped
+
+
 def require_partner(view):
     @wraps(view)
     def wrapped(*args, **kwargs):
@@ -338,9 +354,8 @@ def embed_page():
 
 
 @v1_bp.route("/v1/accounts/list", methods=["GET"])
+@require_admin_v1
 def accounts_list():
-    if not _admin_ok():
-        return jsonify({"status": "error", "detail": "unauthorized"}), 401
     return jsonify({
         "plans": PLANS,
         "accounts": list_accounts(include_email=True),
@@ -348,14 +363,9 @@ def accounts_list():
 
 
 @v1_bp.route("/v1/accounts", methods=["POST"])
+@require_admin_v1
 @limiter.limit("20 per hour")
 def accounts_create():
-    if not _admin_ok():
-        return jsonify({
-            "status": "error",
-            "detail": "unauthorized",
-            "hint": "Seul l'admin crée les comptes (X-Admin-Key).",
-        }), 401
     data = _json()
     plan = (data.get("plan") or "starter").strip().lower()
     payload, err = create_account(
@@ -373,9 +383,8 @@ def accounts_create():
 
 
 @v1_bp.route("/v1/accounts/<int:account_id>/revoke", methods=["POST"])
+@require_admin_v1
 def accounts_revoke(account_id):
-    if not _admin_ok():
-        return jsonify({"status": "error", "detail": "unauthorized"}), 401
     if not revoke_account(account_id):
         return _error("compte_introuvable", 404)
     return jsonify({"status": "revoked", "id": account_id}), 200

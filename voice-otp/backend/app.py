@@ -19,7 +19,10 @@ from routes.v1 import v1_bp
 
 app = Flask(__name__)
 
-if FLASK_DEBUG and os.getenv("ENV", "").strip().lower() in ("production", "prod"):
+_ENV = os.getenv("ENV", "").strip().lower()
+_IS_PROD = _ENV in ("production", "prod")
+
+if FLASK_DEBUG and _IS_PROD:
     raise RuntimeError("FLASK_DEBUG=1 interdit en production (ENV=production)")
 
 if not FLASK_SECRET_KEY or not os.getenv("ADMIN_API_KEY"):
@@ -32,22 +35,37 @@ if not otp_secret or otp_secret == "voice-otp-dev-change-me" or len(otp_secret) 
         "Ajoutez OTP_SECRET dans backend/.env"
     )
 
+# Durcissement production : pas de CORS ouvert, pas de routes /auth sans clé, pas de clés démo.
+_legacy_on = os.getenv("ENABLE_LEGACY_AUTH", "0").strip().lower() in ("1", "true", "yes")
+_demo_on = os.getenv("ENABLE_DEMO_KEYS", "0").strip().lower() in ("1", "true", "yes")
+_cors_origins = CORS_ORIGINS if CORS_ORIGINS else ["http://127.0.0.1:3000"]
+if _IS_PROD:
+    if _legacy_on:
+        raise RuntimeError(
+            "ENABLE_LEGACY_AUTH=1 interdit en production — routes /auth/* sans X-Api-Key"
+        )
+    if _demo_on:
+        raise RuntimeError("ENABLE_DEMO_KEYS=1 interdit en production")
+    if _cors_origins == ["*"] or "*" in _cors_origins:
+        raise RuntimeError(
+            "CORS_ORIGINS=* interdit en production. "
+            "Listez les origines du dashboard (ex. http://127.0.0.1:3001)."
+        )
+
 app.secret_key = FLASK_SECRET_KEY
 app.config["MAX_CONTENT_LENGTH"] = 16 * 1024  # 16 KB — payloads OTP uniquement
 
-_cors_origins = CORS_ORIGINS if CORS_ORIGINS else ["http://127.0.0.1:3000"]
 CORS(
     app,
-    origins="*" if _cors_origins == ["*"] else _cors_origins,
+    origins=_cors_origins,
     allow_headers=["Content-Type", "Authorization", "X-Admin-Key", "X-Api-Key"],
     supports_credentials=False,
 )
 limiter.init_app(app)
 init_db()
 
-# Routes legacy /auth/* désactivées par défaut (ouvertes = risque spam OTP).
-# Activer seulement pour labo : ENABLE_LEGACY_AUTH=1
-if os.getenv("ENABLE_LEGACY_AUTH", "0").strip() in ("1", "true", "yes"):
+# Routes legacy /auth/* : labo uniquement (bloqué si ENV=production ci-dessus).
+if _legacy_on:
     from routes.auth import auth_bp
     from routes.auth_extra import extra_bp
 
